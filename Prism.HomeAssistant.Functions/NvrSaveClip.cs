@@ -10,6 +10,7 @@ using Microsoft.Azure.WebJobs;
 using Microsoft.Azure.WebJobs.Extensions.Http;
 using Microsoft.Extensions.Logging;
 using Newtonsoft.Json;
+using Polly;
 
 namespace Prism.HomeAssistant.Functions;
 
@@ -46,26 +47,32 @@ public class NvrSaveClip
 
         var url = urlPattern.Replace("{{eventId}}", eventId);
 
-        var binaryData = await _httpClient.GetByteArrayAsync(url);
+        var retryPolicy = Policy.Handle<Exception>()
+            .Retry(5);
+
+        var binaryData = await retryPolicy.Execute(async () => await _httpClient.GetByteArrayAsync(url));
 
         log.LogInformation("Downloaded {bytes} bytes of data", binaryData.Length);
 
         var storageConnectionString = Environment.GetEnvironmentVariable("STORAGE_CONNECTION_STRING");
-        
+
         if (string.IsNullOrWhiteSpace(storageConnectionString))
         {
             return new BadRequestObjectResult("Please specify env : STORAGE_CONNECTION_STRING");
         }
 
-        var storageAccount = CloudStorageAccount.Parse(storageConnectionString);
-        var blobClient = storageAccount.CreateCloudBlobClient();
-        var container = blobClient.GetContainerReference("clips");
-        await container.CreateIfNotExistsAsync();
+        await retryPolicy.Execute(async () =>
+        {
+            var storageAccount = CloudStorageAccount.Parse(storageConnectionString);
+            var blobClient = storageAccount.CreateCloudBlobClient();
+            var container = blobClient.GetContainerReference("clips");
+            await container.CreateIfNotExistsAsync();
 
-        var blob = container.GetBlockBlobReference($"{DateTime.Today:yyyy-MM-dd}/{DateTime.Now:HH-mm-ss}-{Guid.NewGuid()}.mp4");
-        await blob.UploadFromStreamAsync(new MemoryStream(binaryData));
-        
-        log.LogInformation("Clip uploaded to blob {blobName}", blob.Name);
+            var blob = container.GetBlockBlobReference($"{DateTime.Today:yyyy-MM-dd}/{DateTime.Now:HH-mm-ss}-{Guid.NewGuid()}.mp4");
+            await blob.UploadFromStreamAsync(new MemoryStream(binaryData));
+
+            log.LogInformation("Clip uploaded to blob {blobName}", blob.Name);
+        });
 
         return new OkResult();
     }
